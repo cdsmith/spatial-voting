@@ -1,5 +1,3 @@
-{-# LANGUAGE ViewPatterns #-}
-
 module Main where
 
 import Control.Monad (replicateM, when)
