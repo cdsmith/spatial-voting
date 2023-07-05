@@ -31,7 +31,7 @@ to the model.  It's not a voting system, but it's a useful baseline for
 comparing voting systems.
 
 ```
-Smith: [[2],[1],[10],[7],[5],[8],[6],[9],[3],[4]]
+Condorcet/Smith: [[2],[1],[10],[7],[5],[8],[6],[9],[3],[4]]
 IRV: [10,7,6,5,2,3,1,8,9,4]
 Plurality: [7,5,6,10,2,1,8,3,9,4]
 Plurality tactical: [7,5,1,2,3,4,6,8,9,10]

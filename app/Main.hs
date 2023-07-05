@@ -142,7 +142,7 @@ simulate voters candidates = do
 
   putStrLn "------------------"
   putStrLn $ "Utilitarian: " <> show utilitarian
-  putStrLn $ "Smith: " <> show smith
+  putStrLn $ "Condorcet/Smith: " <> show smith
   putStrLn $ "IRV: " <> show irv
   putStrLn $ "Plurality: " <> show plurality
   putStrLn $ "Plurality tactical: " <> show tacticalPlurality
