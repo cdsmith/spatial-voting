@@ -1,0 +1,26 @@
+cabal-version:      3.0
+name:               spatial-voting
+version:            0.1.0.0
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Chris Smith
+maintainer:         cdsmith@gmail.com
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md, README.md, docs/points.svg
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:  Dist, Model, Voting, Elections
+    build-depends:    base ^>=4.16.4.0, containers, random, vector
+    hs-source-dirs:   src
+    default-language: GHC2021
+
+executable spatial-voting
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:    base ^>=4.16.4.0, containers, spatial-voting, vector, Chart, Chart-diagrams
+    hs-source-dirs:   app
+    default-language: GHC2021
