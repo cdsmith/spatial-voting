@@ -48,7 +48,8 @@ import Model
     mixtureOfZipfGaussians,
     zipfUniform,
   )
-import System.Environment (getArgs)
+import Options (Options (..), getOptions)
+import System.Random (setStdGen, randomIO, mkStdGen)
 import Voting (mapBallots, rankByRating, rankedBallots)
 
 -- | A voter model that is a mixture of Zipf-Gaussian sub-populations.  This
@@ -140,7 +141,6 @@ simulate voters candidates = do
       dualIrv = generalizedIrvRanking (last . dual pluralityRanking) ballots
       dualPlurality = dual pluralityRanking ballots
 
-  putStrLn "------------------"
   putStrLn $ "Utilitarian: " <> show utilitarian
   putStrLn $ "Condorcet/Smith: " <> show smith
   putStrLn $ "IRV: " <> show irv
@@ -174,12 +174,22 @@ simulate voters candidates = do
 
 main :: IO ()
 main = do
-  [read -> n, read -> m, read -> t] <- getArgs
-  results <- replicateM t $ do
+  options <- getOptions
+  results <- replicateM (numTrials options) $ do
+    putStrLn "------------------"
+    case seed options of
+      Nothing -> do
+        s <- randomIO
+        putStrLn $ "New seed: " <> show s
+        setStdGen (mkStdGen s)
+      Just s -> do
+        putStrLn $ "Reusing seed: " <> show s
+        setStdGen (mkStdGen s)
+
     model <- makeModel
-    candidates <- replicateM n $ sample model
-    voters <- replicateM m $ sample model
-    when (t == 1) $ drawPoints (take 2000 voters) candidates
+    candidates <- replicateM (numCandidates options) $ sample model
+    voters <- replicateM (numVoters options) $ sample model
+    when (numTrials options == 1) $ drawPoints (take 2000 voters) candidates
     simulate voters candidates
 
   let (rawWinAgree, rawCorr) = unzip results
@@ -187,7 +197,7 @@ main = do
       corr = foldl' (zipWith (zipWith (+))) (repeat (repeat 0)) rawCorr
 
   putStrLn "Winner Agreement:"
-  traverse_ print (fmap (/ fromIntegral t) <$> winAgree)
+  traverse_ print (fmap (/ fromIntegral (numTrials options)) <$> winAgree)
 
   putStrLn "Correlation Matrix:"
-  traverse_ print (fmap (/ fromIntegral t) <$> corr)
+  traverse_ print (fmap (/ fromIntegral (numTrials options)) <$> corr)

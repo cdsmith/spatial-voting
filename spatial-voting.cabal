@@ -21,6 +21,7 @@ library
 executable spatial-voting
     import:           warnings
     main-is:          Main.hs
-    build-depends:    base ^>=4.16.4.0, containers, spatial-voting, vector, Chart, Chart-diagrams
+    other-modules:    Options
+    build-depends:    base ^>=4.16.4.0, containers, spatial-voting, vector, Chart, Chart-diagrams, random, optparse-applicative
     hs-source-dirs:   app
     default-language: GHC2021

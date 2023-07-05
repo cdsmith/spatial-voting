@@ -10,7 +10,7 @@ The following command runs a single simulation involving 10 candidates and
 100,000 voters.
 
 ```bash
-cabal run exe:spatial-voting -- 10 100000 1
+cabal run exe:spatial-voting -- --candidates=10 --voters=100000
 ```
 
 A visualization will be written showing the voting populationand the candidates
