@@ -15,13 +15,7 @@ import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..), comparing)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Vector.Unboxed (Vector)
-import Voting
-  ( RankMap,
-    disutility,
-    mapRanks,
-    rankByRating,
-  )
+import Voting (RankMap, mapRanks)
 
 type Candidate = Int
 
@@ -37,7 +31,6 @@ class Tally (fmt :: BallotFormat) where
   type BallotsRep fmt
   honest :: Map Candidate Double -> Ballot fmt
   tally :: [Ballot fmt] -> Ballots fmt
-  tallies :: [Ballots fmt] -> Ballots fmt
 
 instance Tally SingleVote where
   type BallotRep SingleVote = Candidate
@@ -46,7 +39,6 @@ instance Tally SingleVote where
     Ballot $
       fst (minimumBy (compare `on` snd) (Map.toList disutil))
   tally = Ballots . Map.fromListWith (+) . map (,1) . coerce
-  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
 
 instance Tally MultiVote where
   type BallotRep MultiVote = Set Candidate
@@ -55,14 +47,12 @@ instance Tally MultiVote where
     where
       mid = (minimum disutil + maximum disutil) / 2
   tally = Ballots . Map.fromListWith (+) . fmap (,1) . concatMap (Set.toList . coerce)
-  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
 
 instance Tally Ranked where
   type BallotRep Ranked = [Candidate]
   type BallotsRep Ranked = Map [Candidate] Int
   honest disutil = Ballot $ fst <$> List.sortOn snd (Map.toList disutil)
   tally = Ballots . Map.fromListWith (+) . fmap (,1) . coerce
-  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
 
 instance Tally Scored where
   type BallotRep Scored = Map Candidate Double
@@ -73,7 +63,6 @@ instance Tally Scored where
       far = maximum disutil
       adjust x = (far - x) / (far - near)
   tally = Ballots . Map.unionsWith (+) . coerce @_ @[_]
-  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
 
 instance Tally ScoreImpliesRank where
   type BallotRep ScoreImpliesRank = Map Candidate Double
@@ -82,12 +71,13 @@ instance Tally ScoreImpliesRank where
   tally ballots =
     Ballots
       ( tally (coerce ballots),
-        tally (Ballot . rankByRating <$> coerce ballots)
-      )
-  tallies ballots =
-    Ballots
-      ( tallies (fst <$> coerce @_ @[(_, Ballots Ranked)] ballots),
-        tallies (snd <$> coerce @_ @[(Ballots Scored, _)] ballots)
+        tally
+          ( Ballot
+              . fmap fst
+              . List.sortOn @(Down Double) (Down . snd)
+              . Map.toList
+              <$> coerce ballots
+          )
       )
 
 data VotingMethod = Plurality | IRV | Borda | Range | STAR | Condorcet
@@ -176,9 +166,11 @@ instance Votable Range where
       champion = minimum likely
       nemesis = maximum likely
       tacticalScore x
-        | x >= champion = 1
-        | x <= nemesis = 0
-        | otherwise = (x - nemesis) / (champion - nemesis)
+        | champion == nemesis = x
+        | otherwise = epsilon * x + (1 - epsilon) * scaled
+        where
+          scaled = max 0 $ min 1 $ (x - nemesis) / (champion - nemesis)
+          epsilon = 1e-3
 
 instance Votable STAR where
   type BallotFor STAR = ScoreImpliesRank
@@ -193,14 +185,7 @@ instance Votable STAR where
       prelims = winners @Range scored candidates
       finalists = take 2 (concat prelims)
 
-  tactical poll disutil =
-    Ballot $
-      Map.intersectionWith
-        (\a b -> epsilon * a + (1 - epsilon) * b)
-        (coerce (honest @Scored disutil))
-        (coerce (tactical @Range poll disutil))
-    where
-      epsilon = 1e-6
+  tactical poll disutil = coerce (tactical @Range poll disutil)
 
 instance Votable Condorcet where
   type BallotFor Condorcet = Ranked
@@ -213,20 +198,11 @@ instance Votable Condorcet where
               : winners @Condorcet
                 (Ballots (mapRanks (List.\\ s) ballots))
                 (candidates List.\\ s)
-  tactical _ = honest @Ranked
 
--- | A ranking of candidates by utility.  This isn't a realistic voting model,
--- but it's a useful tool for comparing voting systems to see how well they
--- reflect the actual preferences of voters.
-utilityRanking :: [Vector Double] -> [Vector Double] -> [[Int]]
-utilityRanking voters candidates =
-  fmap (fmap fst) $
-    List.groupBy ((==) `on` snd) $
-      List.sortOn
-        snd
-        [ (i, sum (disutility c <$> voters))
-          | (i, c) <- zip [1 ..] candidates
-        ]
+  -- For this variant of Condorcet voting, where Smith sets are always reported
+  -- as ties, there is no tactical voting that can do better than some ordering
+  -- of the ties.
+  tactical _ = honest @Ranked
 
 -- | Given ranked ballot results, compute the head-to-head result of a pair of
 -- candidates.  This is the percent of voters who prefer the first candidate to
@@ -277,19 +253,3 @@ smithSet ballots = head (filter allBeatenBySet options)
       concatMap
         (`subsequencesOfSize` candidates)
         [1 .. length candidates]
-
--- | Given two rankings, compute the Spearman rank correlation coefficient.
--- This is a measure of how similar the two rankings are, where 1 means they are
--- identical, 0 means they are completely unrelated, and -1 means they are
--- exactly opposite.
-rankCorrelation :: [Int] -> [Int] -> Double
-rankCorrelation r1 r2 = 1 - (6 * d2) / (n * (n * n - 1))
-  where
-    n = fromIntegral (length r1)
-    m1 = Map.fromList (zip r1 [1 :: Int ..])
-    m2 = Map.fromList (zip r2 [1 :: Int ..])
-    d2 =
-      sum
-        [ (fromIntegral (m1 Map.! i) - fromIntegral (m2 Map.! i)) ^ (2 :: Int)
-          | i <- [1 .. length r1]
-        ]

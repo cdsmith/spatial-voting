@@ -1,11 +1,11 @@
 module Voting where
 
+import Data.Function (on)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
-import Data.Ord (Down (..))
 import Data.Vector.Unboxed (Vector)
-import qualified Data.Vector.Unboxed as Vector
+import Data.Vector.Unboxed qualified as Vector
 
 -- | Computes the disutility associated with a voter and a possible candidate.
 -- In other words, how unhappy the voter would be with the choice of a
@@ -23,33 +23,20 @@ disutilities candidates voter =
 -- a ballot with each candidate ordering.
 type RankMap a = Map [Int] a
 
--- | The ranked ballot that is cast by this voter based on their distance to
--- each candidate in the space of political affinities.
-rankedBallot :: [Vector Double] -> Vector Double -> [Int]
-rankedBallot candidates voter =
-  fmap fst . List.sortOn snd . Map.toList $ disutilities candidates voter
-
--- | The collective ranked ballots cast by a population of voters, given a list
--- of candidates.
-rankedBallots :: [Vector Double] -> [Vector Double] -> RankMap Double
-rankedBallots voters candidates =
-  fmap (/ fromIntegral (length voters))
-    . Map.fromListWith (+)
-    . map ((,1) . rankedBallot candidates)
-    $ voters
-
 -- | The result of adjusting candidate ballots.  This is a step in several
 -- voting processes, for instance when a candidate is eliminated.
 mapRanks :: Num a => ([Int] -> [Int]) -> RankMap a -> RankMap a
 mapRanks f = Map.delete [] . Map.mapKeysWith (+) f
 
--- Given a score for each candidate, compute the ranking of candidates by
--- decreasing score.
-rankByRating :: Map Int Double -> [Int]
-rankByRating ballots =
-  fst <$> List.sortOn (Down . snd) (Map.toList ballots)
-
--- | Given each voter's rating ballot, compute the collective rating ballot by
--- adding each voter's scores.
-collectRangeBallots :: [Map Int Double] -> Map Int Double
-collectRangeBallots = Map.unionsWith (+)
+-- | A ranking of candidates by utility.  This isn't a realistic voting model,
+-- but it's a useful tool for comparing voting systems to see how well they
+-- reflect the actual preferences of voters.
+utilityRanking :: [Vector Double] -> [Vector Double] -> [[Int]]
+utilityRanking voters candidates =
+  fmap (fmap fst) $
+    List.groupBy ((==) `on` snd) $
+      List.sortOn
+        snd
+        [ (i, sum (disutility c <$> voters))
+          | (i, c) <- zip [1 ..] candidates
+        ]
