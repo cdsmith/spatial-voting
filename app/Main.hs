@@ -1,25 +1,16 @@
+{-# LANGUAGE DataKinds #-}
+{-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
+
 module Main where
 
 import Control.Monad (replicateM, when)
 import Data.Bool (bool)
+import Data.Coerce (coerce)
 import Data.Foldable (foldl', traverse_)
 import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed qualified as Vector
 import Dist (Dist (..), sample)
 import Elections
-  ( bordaRanking,
-    bordaTactics,
-    dual,
-    generalizedIrvRanking,
-    irvRanking,
-    pluralityRanking,
-    pluralityTactics,
-    rangeRating,
-    rankCorrelation,
-    smithRanking,
-    starRanking,
-    utilityRanking,
-  )
 import Graphics.Rendering.Chart.Backend.Diagrams (toFile)
 import Graphics.Rendering.Chart.Easy
   ( FillStyle (..),
@@ -47,8 +38,9 @@ import Model
     zipfUniform,
   )
 import Options (Options (..), getOptions)
-import System.Random (setStdGen, randomIO, mkStdGen)
-import Voting (mapBallots, rankByRating, rankedBallots)
+import System.Random (mkStdGen, randomIO, setStdGen)
+import System.Random.Shuffle (shuffleM)
+import Voting (disutilities)
 
 -- | A voter model that is a mixture of Zipf-Gaussian sub-populations.  This
 -- is the model we'll use for most of our analysis.
@@ -111,64 +103,76 @@ correlations rankings =
 -- correlation matrices.
 simulate :: [Vector Double] -> [Vector Double] -> IO ([[Double]], [[Double]])
 simulate voters candidates = do
+  let disutil = disutilities candidates <$> voters
+      n = length candidates
+
   -- For tactical voting, we need voters with only partial knowledge about the
   -- strength of candidates.  We'll run a "poll" among a small sample of voters
   -- to get this partial information.
-  let pollSize = round (sqrt (fromIntegral (length voters)) :: Double)
-      pollBallots = rankedBallots (take pollSize voters) candidates
-      pollResults = pluralityRanking pollBallots
+  let polled = take 300 disutil
+      pollBallots = tally @SingleVote (honest @SingleVote <$> polled)
+      pollResults = winners @Plurality pollBallots [1 .. n]
 
-  -- Now the actual election.  We'll use the same voters, but with full
-  -- knowledge of their preferences.
-  let ballots = rankedBallots voters candidates
-      utilitarian = utilityRanking voters candidates
-      smith = smithRanking ballots
-      irv = irvRanking ballots
-      plurality = pluralityRanking ballots
+  -- Now the actual election.
+  let utilitarian = utilityRanking voters candidates
+      honestSingle = tally @SingleVote (honest @SingleVote <$> disutil)
+      honestScoreRank@(Ballots (honestScored, honestRanked)) =
+        tally @ScoreImpliesRank
+          (coerce . honest @Scored . disutilities candidates <$> voters)
+
+      condorcet = winners @Condorcet honestRanked [1 .. n]
+      irv = winners @IRV honestRanked [1 .. n]
+      plurality = winners @Plurality honestSingle [1 .. n]
+      borda = winners @Borda honestRanked [1 .. n]
+      range = winners @Range honestScored [1 .. n]
+      star = winners @STAR honestScoreRank [1 .. n]
       tacticalPlurality =
-        pluralityRanking (mapBallots (pluralityTactics pollResults) ballots)
-      borda = bordaRanking ballots
+        winners @Plurality
+          (tally (tactical @Plurality (concat pollResults) <$> disutil))
+          [1 .. n]
       tacticalBorda =
-        bordaRanking (mapBallots (bordaTactics pollResults) ballots)
-      honestRating = rangeRating Nothing voters candidates
-      honestRange = rankByRating honestRating
-      tacticalRating = rangeRating (Just (0.5, pollResults)) voters candidates
-      tacticalRange = rankByRating tacticalRating
-      honestStar = starRanking honestRating ballots
-      tacticalStar = starRanking tacticalRating ballots
-      dualIrv = generalizedIrvRanking (last . dual pluralityRanking) ballots
-      dualPlurality = dual pluralityRanking ballots
+        winners @Borda
+          (tally (tactical @Borda (concat pollResults) <$> disutil))
+          [1 .. n]
+      tacticalRange =
+        winners @Range
+          (tally (tactical @Range (concat pollResults) <$> disutil))
+          [1 .. n]
+      tacticalStar =
+        winners @STAR
+          (tally (tactical @STAR (concat pollResults) <$> disutil))
+          [1 .. n]
 
   putStrLn $ "Utilitarian: " <> show utilitarian
-  putStrLn $ "Condorcet/Smith: " <> show smith
+  putStrLn $ "Condorcet: " <> show condorcet
   putStrLn $ "IRV: " <> show irv
   putStrLn $ "Plurality: " <> show plurality
   putStrLn $ "Plurality tactical: " <> show tacticalPlurality
   putStrLn $ "Borda: " <> show borda
   putStrLn $ "Borda tactical: " <> show tacticalBorda
-  putStrLn $ "Range: " <> show honestRange
+  putStrLn $ "Range: " <> show range
   putStrLn $ "Range tactical: " <> show tacticalRange
-  putStrLn $ "STAR: " <> show honestStar
+  putStrLn $ "STAR: " <> show star
   putStrLn $ "STAR tactical: " <> show tacticalStar
-  putStrLn $ "Dual IRV: " <> show dualIrv
-  putStrLn $ "Dual Plurality: " <> show dualPlurality
 
   let allRankings =
         [ utilitarian,
-          concat smith,
+          condorcet,
           irv,
           plurality,
           tacticalPlurality,
           borda,
           tacticalBorda,
-          honestRange,
+          range,
           tacticalRange,
-          honestStar,
-          tacticalStar,
-          dualIrv,
-          dualPlurality
+          star,
+          tacticalStar
         ]
-  pure (winnerAgreement allRankings, correlations allRankings)
+
+  -- Shuffle the order of ties, so that statistics will on average reflect the
+  -- fact that we learned nothing about the order of tied candidates.
+  simpleRankings <- traverse (fmap concat . traverse shuffleM) allRankings
+  pure (winnerAgreement simpleRankings, correlations simpleRankings)
 
 main :: IO ()
 main = do

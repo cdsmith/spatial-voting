@@ -98,10 +98,3 @@ mixtureOfZipfGaussians mog = do
             | (mu, i) <- zip (Vector.toList m) dims
           ]
       )
-
--- | Computes the distance between two vectors.  This is used to decide how
--- similar voters and candidates are, based on their agreement about each axis
--- of political affinity.
-distance :: Vector Double -> Vector Double -> Double
-distance p1 p2 =
-  sqrt $ Vector.sum $ Vector.zipWith (\x y -> (x - y) * (x - y)) p1 p2

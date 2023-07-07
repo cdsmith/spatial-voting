@@ -1,173 +1,256 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
+
 module Elections where
 
+import Data.Coerce (coerce)
+import Data.Foldable (foldl', maximumBy, minimumBy)
+import Data.Function (on)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (listToMaybe, mapMaybe)
-import Data.Ord (Down (..))
+import Data.Maybe (fromMaybe)
+import Data.Ord (Down (..), comparing)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Vector.Unboxed (Vector)
-import Model (distance)
-import Voting (RankedBallots, collectRangeBallots, mapBallots, rankByRating)
+import Voting
+  ( RankMap,
+    disutility,
+    mapRanks,
+    rankByRating,
+  )
+
+type Candidate = Int
+
+data BallotFormat = SingleVote | MultiVote | Ranked | Scored | ScoreImpliesRank
+  deriving (Eq, Ord, Show, Read, Enum, Bounded)
+
+newtype Ballot (fmt :: BallotFormat) = Ballot (BallotRep fmt)
+
+newtype Ballots (fmt :: BallotFormat) = Ballots (BallotsRep fmt)
+
+class Tally (fmt :: BallotFormat) where
+  type BallotRep fmt
+  type BallotsRep fmt
+  honest :: Map Candidate Double -> Ballot fmt
+  tally :: [Ballot fmt] -> Ballots fmt
+  tallies :: [Ballots fmt] -> Ballots fmt
+
+instance Tally SingleVote where
+  type BallotRep SingleVote = Candidate
+  type BallotsRep SingleVote = Map Candidate Int
+  honest disutil =
+    Ballot $
+      fst (minimumBy (compare `on` snd) (Map.toList disutil))
+  tally = Ballots . Map.fromListWith (+) . map (,1) . coerce
+  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
+
+instance Tally MultiVote where
+  type BallotRep MultiVote = Set Candidate
+  type BallotsRep MultiVote = Map Candidate Int
+  honest disutil = Ballot $ Map.keysSet (Map.filter (< mid) disutil)
+    where
+      mid = (minimum disutil + maximum disutil) / 2
+  tally = Ballots . Map.fromListWith (+) . fmap (,1) . concatMap (Set.toList . coerce)
+  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
+
+instance Tally Ranked where
+  type BallotRep Ranked = [Candidate]
+  type BallotsRep Ranked = Map [Candidate] Int
+  honest disutil = Ballot $ fst <$> List.sortOn snd (Map.toList disutil)
+  tally = Ballots . Map.fromListWith (+) . fmap (,1) . coerce
+  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
+
+instance Tally Scored where
+  type BallotRep Scored = Map Candidate Double
+  type BallotsRep Scored = Map Candidate Double
+  honest disutil = Ballot (adjust <$> disutil)
+    where
+      near = minimum disutil
+      far = maximum disutil
+      adjust x = (far - x) / (far - near)
+  tally = Ballots . Map.unionsWith (+) . coerce @_ @[_]
+  tallies = Ballots . Map.unionsWith (+) . coerce @_ @[_]
+
+instance Tally ScoreImpliesRank where
+  type BallotRep ScoreImpliesRank = Map Candidate Double
+  type BallotsRep ScoreImpliesRank = (Ballots Scored, Ballots Ranked)
+  honest = coerce . honest @Scored
+  tally ballots =
+    Ballots
+      ( tally (coerce ballots),
+        tally (Ballot . rankByRating <$> coerce ballots)
+      )
+  tallies ballots =
+    Ballots
+      ( tallies (fst <$> coerce @_ @[(_, Ballots Ranked)] ballots),
+        tallies (snd <$> coerce @_ @[(Ballots Scored, _)] ballots)
+      )
+
+data VotingMethod = Plurality | IRV | Borda | Range | STAR | Condorcet
+  deriving (Eq, Ord, Show, Read, Enum, Bounded)
+
+class Votable (m :: VotingMethod) where
+  type BallotFor m :: BallotFormat
+  winners :: Ballots (BallotFor m) -> [Candidate] -> [[Candidate]]
+  tactical ::
+    [Candidate] ->
+    Map Candidate Double ->
+    Ballot (BallotFor m)
+
+instance Votable Plurality where
+  type BallotFor Plurality = SingleVote
+
+  winners (Ballots ballots) candidates =
+    fmap fst
+      <$> List.groupBy
+        ((==) `on` snd)
+        ( List.sortOn
+            (Down . snd)
+            [(c, fromMaybe 0 (Map.lookup c ballots)) | c <- candidates]
+        )
+
+  tactical poll disutil =
+    Ballot $ minimumBy (comparing (disutil Map.!)) (take 2 poll)
+
+instance Votable IRV where
+  type BallotFor IRV = Ranked
+
+  winners (Ballots ballots) candidates
+    | Map.null ballots = []
+    | otherwise =
+        winners @IRV
+          (Ballots (mapRanks (List.\\ elim) ballots))
+          (candidates List.\\ elim)
+          ++ [elim]
+    where
+      firstPlace = Map.mapKeysWith (+) head ballots
+      unranked = candidates List.\\ Map.keys firstPlace
+      elim
+        | null unranked = Map.keys (Map.filter (== minimum firstPlace) firstPlace)
+        | otherwise = unranked
+
+  tactical poll disutil = Ballot (champion : others)
+    where
+      champion = minimumBy (comparing (disutil Map.!)) (take 3 poll)
+      others = List.sortOn (disutil Map.!) (List.delete champion poll)
+
+instance Votable Borda where
+  type BallotFor Borda = Ranked
+
+  winners (Ballots ballots) _ =
+    map (map fst)
+      . List.groupBy ((==) `on` snd)
+      . List.sortOn snd
+      . Map.toList
+      . Map.fromListWith (+)
+      . concatMap (\(r, n) -> zipWith (curry (fmap (* n))) r [1 ..])
+      . Map.toList
+      $ ballots
+
+  tactical poll disutil = Ballot (champion : others ++ [nemesis])
+    where
+      champion = minimumBy (comparing (disutil Map.!)) (take 2 poll)
+      nemesis = maximumBy (comparing (disutil Map.!)) (take 2 poll)
+      others =
+        List.sortOn
+          (disutil Map.!)
+          (List.delete champion (List.delete nemesis poll))
+
+instance Votable Range where
+  type BallotFor Range = Scored
+
+  winners (Ballots ballots) _ =
+    fmap fst
+      <$> List.groupBy
+        ((==) `on` snd)
+        (List.sortOn (Down . snd) (Map.toList ballots))
+
+  tactical poll disutil =
+    Ballot (tacticalScore <$> coerce (honest @Scored disutil))
+    where
+      likely = Map.filterWithKey (\c _ -> c `elem` take 2 poll) disutil
+      champion = minimum likely
+      nemesis = maximum likely
+      tacticalScore x
+        | x >= champion = 1
+        | x <= nemesis = 0
+        | otherwise = (x - nemesis) / (champion - nemesis)
+
+instance Votable STAR where
+  type BallotFor STAR = ScoreImpliesRank
+
+  winners (Ballots (scored, Ballots ranked)) candidates =
+    winners
+      @Plurality
+      (Ballots (Map.mapKeysWith (+) (head . filter (`elem` finalists)) ranked))
+      finalists
+      ++ filter (not . null) (filter (`notElem` finalists) <$> prelims)
+    where
+      prelims = winners @Range scored candidates
+      finalists = take 2 (concat prelims)
+
+  tactical poll disutil =
+    Ballot $
+      Map.intersectionWith
+        (\a b -> epsilon * a + (1 - epsilon) * b)
+        (coerce (honest @Scored disutil))
+        (coerce (tactical @Range poll disutil))
+    where
+      epsilon = 1e-6
+
+instance Votable Condorcet where
+  type BallotFor Condorcet = Ranked
+
+  winners (Ballots ballots) candidates
+    | Map.null ballots = []
+    | otherwise =
+        let s = smithSet ballots
+         in s
+              : winners @Condorcet
+                (Ballots (mapRanks (List.\\ s) ballots))
+                (candidates List.\\ s)
+  tactical _ = honest @Ranked
 
 -- | A ranking of candidates by utility.  This isn't a realistic voting model,
 -- but it's a useful tool for comparing voting systems to see how well they
 -- reflect the actual preferences of voters.
-utilityRanking :: [Vector Double] -> [Vector Double] -> [Int]
+utilityRanking :: [Vector Double] -> [Vector Double] -> [[Int]]
 utilityRanking voters candidates =
-  fst
-    <$> List.sortOn
-      snd
-      [ (i, sum (distance c <$> voters))
-        | (i, c) <- zip [1 ..] candidates
-      ]
-
--- | A ballot that would be cast by a voter in a range voting election, if they
--- are honest about their preferences.  They rank their least preferred
--- candidate zero, their most preferred candidate one, and interpolate linearly
--- in between.
-honestRangeBallot :: [Vector Double] -> Vector Double -> Map Int Double
-honestRangeBallot candidates voter =
-  Map.fromList [(c, (d1 - d) / (d1 - d0)) | (c, d) <- zip [1 ..] distances]
-  where
-    distances = distance voter <$> candidates
-    d0 = minimum distances
-    d1 = maximum distances
-
--- | A ballot that would be cast by a voter in a range voting election, if they
--- are purely tactical about their preferences.  They consider the candidates
--- most likely to win, and cast their ballot to maximize their influence on
--- those candidates by assigning them minimum and maximum scores.  Secondary
--- preferences that lie between the two can still receive intermediate scores.
-tacticalRangeBallot :: [Int] -> [Int] -> Map Int Double
-tacticalRangeBallot likelyWinners preferences =
-  Map.fromList (go likelyWinners 0)
-  where
-    go (c1 : c2 : candidates) squeeze =
-      let (good, bad)
-            | c1 `preferredTo` c2 = (c1, c2)
-            | otherwise = (c2, c1)
-          (better, candidates') = List.partition (`preferredTo` good) candidates
-          (worse, candidates'') = List.partition (bad `preferredTo`) candidates'
-       in ((,1 - squeeze) <$> c1 : better)
-            ++ ((,squeeze) <$> c2 : worse)
-            ++ go candidates'' ((squeeze + 1) / 3)
-    go [c] _ = [(c, 0.5)]
-    go [] _ = []
-
-    preferredTo c1 c2 =
-      List.elemIndex c1 preferences < List.elemIndex c2 preferences
-
--- | A ballot that would be cast by a voter in a range voting election, if they
--- are tactical about their preferences, but only to a limited extent.  They
--- exaggerate their preferences in a tactical way by taking a weighted average
--- of their honest and tactical ballots.
-mixedRangeBallot ::
-  Double -> [Int] -> [Vector Double] -> Vector Double -> Map Int Double
-mixedRangeBallot p likelyWinners candidates voter =
-  Map.intersectionWith
-    (\a b -> p * a + (1 - p) * b)
-    (tacticalRangeBallot likelyWinners preferences)
-    (honestRangeBallot candidates voter)
-  where
-    preferences = utilityRanking [voter] candidates
-
--- | Given a list of voters and a list of candidates, compute the collective
--- range election result.  The first argument indicates whether the voter is
--- tactical, and if so, how much they exaggerate their preferences and which
--- candidates they consider likely to win.
-rangeRating ::
-  Maybe (Double, [Int]) -> [Vector Double] -> [Vector Double] -> Map Int Double
-rangeRating tactics voters candidates =
-  collectRangeBallots (ballot <$> voters)
-  where
-    ballot = case tactics of
-      Nothing -> honestRangeBallot candidates
-      Just (p, likelyWinners) -> mixedRangeBallot p likelyWinners candidates
-
--- | Given ranked ballot results, compute the plurality ranking of candidates.
--- This is the ranking by number of first place votes, also known (though
--- misleadingly) as "first past the post".
-pluralityRanking :: RankedBallots -> [Int]
-pluralityRanking ballots = ranked ++ List.sort unranked
-  where
-    candidates = head $ Map.keys ballots
-    ranked =
-      fst
-        <$> List.sortOn
-          (Down . snd)
-          (Map.toList (Map.mapKeysWith (+) head ballots))
-    unranked = candidates List.\\ ranked
-
--- | A tactical modification made by a voter to their ranked ballot to optimize
--- their influence on the outcome of a plurality election.  They will choose
--- their favorite out of the two candidates they consider most likely to win,
--- and rank that candidate first, and the rest afterward.
-pluralityTactics :: [Int] -> [Int] -> [Int]
-pluralityTactics likelyWinners preferences =
-  champion : List.delete champion preferences
-  where
-    likely = take 2 likelyWinners
-    champion = head (filter (`elem` likely) preferences)
-
--- | Given ranked ballot results, compute the generalized IRV ranking of
--- candidates.  This generalization allows you to substitute any elimination
--- rule to decide which candidate to eliminate at each step.
-generalizedIrvRanking :: (RankedBallots -> Int) -> RankedBallots -> [Int]
-generalizedIrvRanking elimRule ballots
-  | length ballots == 1 = head (Map.keys ballots)
-  | otherwise =
-      generalizedIrvRanking
-        elimRule
-        (mapBallots (List.delete worst) ballots)
-        ++ [worst]
-  where
-    worst = elimRule ballots
-
--- | Given ranked ballot results, compute the IRV ranking of candidates.  The
--- ranking is based on the order candidates are eliminated.
-irvRanking :: RankedBallots -> [Int]
-irvRanking = generalizedIrvRanking (last . pluralityRanking)
-
--- | Dualizes an election rule, by using it to choose the worst candidates
--- by reversing the rankings on each ballot, then reversing the result.
---
--- Some election rules, such as Smith/Condorcet, Borda count, and range voting,
--- are unaffected by this transformation.  Others do something very different.
-dual :: (RankedBallots -> [a]) -> RankedBallots -> [a]
-dual f ballots = reverse (f (Map.mapKeysWith (+) reverse ballots))
+  fmap (fmap fst) $
+    List.groupBy ((==) `on` snd) $
+      List.sortOn
+        snd
+        [ (i, sum (disutility c <$> voters))
+          | (i, c) <- zip [1 ..] candidates
+        ]
 
 -- | Given ranked ballot results, compute the head-to-head result of a pair of
 -- candidates.  This is the percent of voters who prefer the first candidate to
 -- the second.
-headToHead :: RankedBallots -> Int -> Int -> Double
+headToHead :: Real a => RankMap a -> Int -> Int -> Double
 headToHead ballots c c' =
-  sum
-    [ ballots Map.! r
-      | r <- Map.keys ballots,
-        List.elemIndex c r < List.elemIndex c' r
-    ]
+  uncurry (/) $
+    foldl'
+      (\(w1, n1) (w2, n2) -> (w1 + w2, n1 + n2))
+      (0, 0)
+      [ if List.elemIndex c r < List.elemIndex c' r
+          then (val, val)
+          else (0, val)
+        | r <- Map.keys ballots,
+          let val = realToFrac (ballots Map.! r)
+      ]
 
 -- | Given ranked ballot results, compute the head-to-head matrix of all pairs
 -- of candidates.  This is the percent of voters who prefer each candidate to
 -- each other candidate.
-h2hMatrix :: RankedBallots -> [[Double]]
+h2hMatrix :: Real a => RankMap a -> [[Double]]
 h2hMatrix ballots = [[headToHead ballots c c' | c' <- [1 .. n]] | c <- [1 .. n]]
   where
     n = maximum (head $ Map.keys ballots) + 1
-
--- | Given ranked ballot results, compute the Condorcet winner, if one exists.
-condorcetWinner :: RankedBallots -> Maybe Int
-condorcetWinner ballots =
-  listToMaybe
-    [ c
-      | c <- candidates,
-        all
-          (\c' -> h2h !! (c - 1) !! (c' - 1) > 0.5)
-          (List.delete c candidates)
-    ]
-  where
-    candidates = head $ Map.keys ballots
-    h2h = h2hMatrix ballots
 
 -- | Compute all subsequences of a given length.
 subsequencesOfSize :: Int -> [a] -> [[a]]
@@ -181,7 +264,7 @@ subsequencesOfSize n (x : xs) =
 -- set.  If there is a Condorcet winner, the Smith set is just that candidate;
 -- otherwise, it contains three or more candidates who are essentially tied by
 -- the Condorcet criterion.
-smithSet :: RankedBallots -> [Int]
+smithSet :: Real a => RankMap a -> [Int]
 smithSet ballots = head (filter allBeatenBySet options)
   where
     candidates = head (Map.keys ballots)
@@ -194,61 +277,6 @@ smithSet ballots = head (filter allBeatenBySet options)
       concatMap
         (`subsequencesOfSize` candidates)
         [1 .. length candidates]
-
--- | Given ranked ballot results, compute the Smith ranking.  This is the
--- partition of candidates into Smith sets, where each set contains candidates
--- who would lose to any candidate in an earlier set, but beat any candidate in
--- a later set.  Candidates within each set are essentially tied by the
--- Condorcet criterion.
-smithRanking :: RankedBallots -> [[Int]]
-smithRanking ballots
-  | Map.null ballots = []
-  | otherwise =
-      let s = smithSet ballots
-       in s : smithRanking (mapBallots (List.\\ s) ballots)
-
--- | Given ranked ballot results, compute the Borda ranking.  This is the
--- ranking by total Borda count, which is the sum of each candidate's rank on
--- each ballot.
-bordaRanking :: RankedBallots -> [Int]
-bordaRanking =
-  map fst
-    . List.sortOn snd
-    . Map.toList
-    . Map.fromListWith (+)
-    . concatMap (\(r, n) -> zipWith (curry (fmap (* n))) r [1 ..])
-    . Map.toList
-
--- | A tactical modification made by a voter to their ranked ballot to optimize
--- their influence on the outcome of a Borda election.  They will move any
--- candidates they consider likely to win to the top or bottom of their ballot
--- (depending on whether they like or dislike that candidate), to maximize the
--- difference in Borda count between them.  Less likely winners will be used
--- to pad the middle of the ballot.
-bordaTactics :: [Int] -> [Int] -> [Int]
-bordaTactics likelyWinners preferences =
-  fst <$> List.sortOn modifiedRank (zip preferences [0 :: Double ..])
-  where
-    keyPrefs = take 2 (mapMaybe (`List.elemIndex` preferences) likelyWinners)
-    width = fromIntegral (maximum keyPrefs - minimum keyPrefs)
-    midpoint =
-      fromIntegral (sum keyPrefs)
-        / fromIntegral (length keyPrefs) ::
-        Double
-    modifiedRank (c, r) =
-      let likelyRank = maybe 100 fromIntegral (List.elemIndex c likelyWinners)
-       in 1 / (1 + exp (-(k / likelyRank) * (r - midpoint))) + r / 100
-    k = 1 / (width + 1)
-
--- | Given ranked ballot results, compute the STAR ranking.  This is the
--- result obtained by ordering candidates by their average rating, then
--- conducting a head-to-head runoff between the top two candidates.
-starRanking :: Map Int Double -> RankedBallots -> [Int]
-starRanking ratings ballots =
-  pluralityRanking (mapBallots (filter (`elem` finalists)) ballots)
-    ++ rankByRating (Map.filterWithKey (\c _ -> c `notElem` finalists) ratings)
-  where
-    finalists = take 2 (rankByRating ratings)
 
 -- | Given two rankings, compute the Spearman rank correlation coefficient.
 -- This is a measure of how similar the two rankings are, where 1 means they are
