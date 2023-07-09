@@ -10,6 +10,7 @@ import Data.Foldable (foldl', traverse_)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
+import Data.Traversable (for)
 import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed qualified as Vector
 import Dist (Dist (..), sample)
@@ -45,15 +46,15 @@ import Graphics.Rendering.Chart.Easy
 import Model
   ( MixtureOfZipfGaussians (..),
     VoterModel,
+    disutilities,
     mixtureOfZipfGaussians,
+    utilityRanking,
     zipfUniform,
   )
 import Numeric (showFFloat)
 import Options (Options (..), getOptions)
 import System.Random (mkStdGen, randomIO, setStdGen)
 import System.Random.Shuffle (shuffleM)
-import Voting (disutilities, utilityRanking)
-import Data.Traversable (for)
 
 -- | A voter model that is a mixture of Zipf-Gaussian sub-populations.  This
 -- is the model we'll use for most of our analysis.

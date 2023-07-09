@@ -13,7 +13,7 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Dist, Model, Voting, Elections
+    exposed-modules:  Dist, Model, Elections
     build-depends:    base ^>=4.16.4.0, containers, random, vector
     hs-source-dirs:   src
     default-language: GHC2021

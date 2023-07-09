@@ -15,9 +15,7 @@ import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..), comparing)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Voting (RankMap, mapRanks)
-
-type Candidate = Int
+import Model (Candidate, mapRanks)
 
 data BallotFormat = SingleVote | MultiVote | Ranked | Scored | ScoreImpliesRank
   deriving (Eq, Ord, Show, Read, Enum, Bounded)
@@ -226,7 +224,7 @@ instance Votable Condorcet where
 -- | Given ranked ballot results, compute the head-to-head result of a pair of
 -- candidates.  This is the percent of voters who prefer the first candidate to
 -- the second.
-headToHead :: Real a => RankMap a -> Int -> Int -> Double
+headToHead :: Real a => Map [Candidate] a -> Int -> Int -> Double
 headToHead ballots c c' =
   uncurry (/) $
     foldl'
@@ -242,7 +240,7 @@ headToHead ballots c c' =
 -- | Given ranked ballot results, compute the head-to-head matrix of all pairs
 -- of candidates.  This is the percent of voters who prefer each candidate to
 -- each other candidate.
-h2hMatrix :: Real a => RankMap a -> [[Double]]
+h2hMatrix :: Real a => Map [Candidate] a -> [[Double]]
 h2hMatrix ballots = [[headToHead ballots c c' | c' <- [1 .. n]] | c <- [1 .. n]]
   where
     n = maximum (head $ Map.keys ballots) + 1
@@ -259,7 +257,7 @@ subsequencesOfSize n (x : xs) =
 -- set.  If there is a Condorcet winner, the Smith set is just that candidate;
 -- otherwise, it contains three or more candidates who are essentially tied by
 -- the Condorcet criterion.
-smithSet :: Real a => RankMap a -> [Int]
+smithSet :: Real a => Map [Candidate] a -> [Int]
 smithSet ballots = head (filter allBeatenBySet options)
   where
     candidates = head (Map.keys ballots)
