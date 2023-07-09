@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
 
@@ -5,17 +6,16 @@ module Main where
 
 import Control.Monad (replicateM, when)
 import Data.Bool (bool)
-import Data.Coerce (coerce)
 import Data.Foldable (foldl', traverse_)
 import Data.List qualified as List
+import Data.Map (Map)
 import Data.Map.Strict qualified as Map
 import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed qualified as Vector
 import Dist (Dist (..), sample)
 import Elections
-  ( Ballot (Ballot),
-    BallotFormat (..),
-    Ballots (Ballots),
+  ( BallotFor,
+    Votable,
     VotingMethod (..),
     honest,
     tactical,
@@ -48,10 +48,12 @@ import Model
     mixtureOfZipfGaussians,
     zipfUniform,
   )
+import Numeric (showFFloat)
 import Options (Options (..), getOptions)
 import System.Random (mkStdGen, randomIO, setStdGen)
 import System.Random.Shuffle (shuffleM)
 import Voting (disutilities, utilityRanking)
+import Data.Traversable (for)
 
 -- | A voter model that is a mixture of Zipf-Gaussian sub-populations.  This
 -- is the model we'll use for most of our analysis.
@@ -126,6 +128,31 @@ correlations :: [[Int]] -> [[Int]] -> [[Double]]
 correlations rs1 rs2 =
   [[rankCorrelation r1 r2 | r2 <- rs2] | r1 <- rs1]
 
+honestAndTactical :: forall method. Votable method => [Map Int Double] -> IO ([[Int]], [[Int]])
+honestAndTactical disutils = (honestWinners,) <$> go (10 :: Int) honestWinners
+  where
+    honestBallots = tally (honest @(BallotFor method) <$> disutils)
+    honestWinners = winners @method honestBallots (Map.keys (head disutils))
+
+    rankWinners = rankFrom 1
+      where
+        rankFrom _ [] = []
+        rankFrom base (cs : css) =
+          let n = fromIntegral (length cs)
+           in [(c, base + (n - 1) / 2) | c <- cs] ++ rankFrom (base + n) css
+
+    fuzzyShuffle cs =
+      map fst . List.sortOn snd
+        <$> traverse (traverse fuzzRank) (rankWinners cs)
+      where
+        fuzzRank d = (d +) <$> sample (Gaussian 0 (d / 3))
+
+    go 0 result = pure result
+    go n result = do
+      ballots <- for disutils $ \disutil -> tactical @method <$> fuzzyShuffle result <*> pure disutil
+      let tacticalWinners = winners @method (tally ballots) (Map.keys (head disutils))
+      go (n - 1) tacticalWinners
+
 -- | Run a simulation of an election, and return the winner agreement and
 -- correlation matrices.
 simulate ::
@@ -133,88 +160,34 @@ simulate ::
   [Vector Double] ->
   IO ([(String, [[Int]])], [[Double]], [[Double]])
 simulate voters candidates = do
-  let disutil = disutilities candidates <$> voters
+  let disutils = disutilities candidates <$> voters
       n = length candidates
-
-  -- For tactical voting, we need voters with only partial knowledge about the
-  -- strength of candidates.  We'll run a "poll" among a small sample of voters
-  -- to get this partial information.
-  let polled = take 300 disutil
-      pollBallots = tally @SingleVote (honest @SingleVote <$> polled)
-      pollResults = winners @Plurality pollBallots [1 .. n]
 
   -- Now the actual election.
   let utilitarian = utilityRanking voters candidates
-      honestSingle = tally @SingleVote (honest @SingleVote <$> disutil)
-      honestScoreRank@(Ballots (honestScored, honestRanked)) =
-        tally @ScoreImpliesRank
-          (coerce . honest @Scored . disutilities candidates <$> voters)
-
-      condorcet = winners @Condorcet honestRanked [1 .. n]
-      irv = winners @IRV honestRanked [1 .. n]
-      plurality = winners @Plurality honestSingle [1 .. n]
-      borda = winners @Borda honestRanked [1 .. n]
-      range = winners @Range honestScored [1 .. n]
-      star = winners @STAR honestScoreRank [1 .. n]
-      tacticalPlurality =
-        winners @Plurality
-          (tally (tactical @Plurality (concat pollResults) <$> disutil))
-          [1 .. n]
-      ultraTacticalPlurality =
-        winners @Plurality
-          (tally (tactical @Plurality (concat tacticalPlurality) <$> disutil))
-          [1 .. n]
-      tacticalIRV =
-        winners @IRV
-          (tally (tactical @IRV (concat pollResults) <$> disutil))
-          [1 .. n]
-      ultraTacticalIRV =
-        winners @IRV
-          (tally (tactical @IRV (concat tacticalIRV) <$> disutil))
-          [1 .. n]
-      tacticalBorda =
-        winners @Borda
-          (tally (tactical @Borda (concat pollResults) <$> disutil))
-          [1 .. n]
-      ultraTacticalBorda =
-        winners @Borda
-          (tally (tactical @Borda (concat tacticalBorda) <$> disutil))
-          [1 .. n]
-      tacticalRange =
-        winners @Range
-          (tally (tactical @Range (concat pollResults) <$> disutil))
-          [1 .. n]
-      ultraTacticalRange =
-        winners @Range
-          (tally (tactical @Range (concat tacticalRange) <$> disutil))
-          [1 .. n]
-      tacticalStar =
-        winners @STAR
-          (tally (tactical @STAR (concat pollResults) <$> disutil))
-          [1 .. n]
-      ultraTacticalStar =
-        winners @STAR
-          (tally (tactical @STAR (concat tacticalStar) <$> disutil))
-          [1 .. n]
+      condorcet = winners @Condorcet (tally (honest <$> disutils)) [1 .. n]
+  (irv, tacticalIRV) <- honestAndTactical @IRV disutils
+  (plurality, tacticalPlurality) <- honestAndTactical @Plurality disutils
+  (borda, tacticalBorda) <- honestAndTactical @Borda disutils
+  (range, tacticalRange) <- honestAndTactical @Range disutils
+  (approval, tacticalApproval) <- honestAndTactical @Approval disutils
+  (star, tacticalSTAR) <- honestAndTactical @STAR disutils
 
   let allRankings =
         [ ("Util", utilitarian),
           ("Cond", condorcet),
           ("nIRV", irv),
           ("tIRV", tacticalIRV),
-          ("uIRV", ultraTacticalIRV),
           ("nPlu", plurality),
           ("tPlu", tacticalPlurality),
-          ("uPlu", ultraTacticalPlurality),
           ("nBrd", borda),
           ("tBrd", tacticalBorda),
-          ("uBrd", ultraTacticalBorda),
           ("nRng", range),
           ("tRng", tacticalRange),
-          ("uRng", ultraTacticalRange),
+          ("nApp", approval),
+          ("tApp", tacticalApproval),
           ("nStr", star),
-          ("tStr", tacticalStar),
-          ("uStr", ultraTacticalStar)
+          ("tStr", tacticalSTAR)
         ]
 
   traverse_ (\(lbl, r) -> putStrLn $ lbl <> ": " <> show r) allRankings
@@ -251,14 +224,16 @@ main = do
       winAgree = foldl' (zipWith (zipWith (+))) (repeat (repeat 0)) rawWinAgree
       corr = foldl' (zipWith (zipWith (+))) (repeat (repeat 0)) rawCorr
 
+  let printRow (label, nums) = putStrLn $ label <> ": " <> unwords (flip (showFFloat (Just 3)) "" <$> nums)
+
   putStrLn "Winner Agreement:"
-  putStrLn $ "         " <> List.intercalate "  " labels
+  putStrLn $ "      " <> List.intercalate "  " labels
   traverse_
-    print
+    printRow
     (zip labels (fmap (/ fromIntegral (numTrials options)) <$> winAgree))
 
   putStrLn "Correlation Matrix:"
-  putStrLn $ "         " <> List.intercalate "  " labels
+  putStrLn $ "      " <> List.intercalate "  " labels
   traverse_
-    print
+    printRow
     (zip labels (fmap (/ fromIntegral (numTrials options)) <$> corr))

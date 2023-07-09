@@ -80,10 +80,10 @@ instance Tally ScoreImpliesRank where
           )
       )
 
-data VotingMethod = Plurality | IRV | Borda | Range | STAR | Condorcet
+data VotingMethod = Plurality | IRV | Borda | Approval | Range | STAR | Condorcet
   deriving (Eq, Ord, Show, Read, Enum, Bounded)
 
-class Votable (m :: VotingMethod) where
+class Tally (BallotFor m) => Votable (m :: VotingMethod) where
   type BallotFor m :: BallotFormat
   winners :: Ballots (BallotFor m) -> [Candidate] -> [[Candidate]]
   tactical ::
@@ -149,6 +149,25 @@ instance Votable Borda where
         List.sortOn
           (disutil Map.!)
           (List.delete champion (List.delete nemesis poll))
+
+instance Votable Approval where
+  type BallotFor Approval = MultiVote
+
+  winners (Ballots ballots) candidates =
+    fmap fst
+      <$> List.groupBy
+        ((==) `on` snd)
+        ( List.sortOn
+            (Down . snd)
+            ( Map.toList ballots
+                ++ [(c, 0) | c <- candidates, not (c `Map.member` ballots)]
+            )
+        )
+
+  tactical poll disutil =
+    Ballot (Map.keysSet (Map.filter (<= championDisutil) disutil))
+    where
+      championDisutil = minimum ((disutil Map.!) <$> take 2 poll)
 
 instance Votable Range where
   type BallotFor Range = Scored
